@@ -24,7 +24,7 @@ WORKDIR /app
 # Criar diretório de fontes customizadas que o código espera
 RUN mkdir -p /usr/share/fonts/custom
 
-# Baixar e instalar fontes Liberation no diretório correto
+# Baixar e instalar fontes Liberation no diretório correto (URL SEM colchetes)
 RUN wget -q https://github.com/liberationfonts/liberation-fonts/releases/download/2.1.5/liberation-fonts-ttf-2.1.5.tar.gz && \
     tar -xzf liberation-fonts-ttf-2.1.5.tar.gz && \
     cp liberation-fonts-ttf-2.1.5/*.ttf /usr/share/fonts/custom/ && \
