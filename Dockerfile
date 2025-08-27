@@ -24,32 +24,21 @@ WORKDIR /app
 # Criar diretório de fontes customizadas que o código espera
 RUN mkdir -p /usr/share/fonts/custom
 
-# Copiar fontes Liberation já disponíveis do sistema para o diretório custom
-RUN find /usr/share/fonts -name "Liberation*.ttf" -exec cp {} /usr/share/fonts/custom/ \;
+# Método garantido: Copiar Liberation Sans com nome Arial
+RUN cp /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf /usr/share/fonts/custom/Arial.ttf 2>/dev/null || \
+    find /usr/share/fonts -name "*Liberation*Sans*Regular*" -exec cp {} /usr/share/fonts/custom/Arial.ttf \; || \
+    find /usr/share/fonts -name "*DejaVu*Sans.ttf" -exec cp {} /usr/share/fonts/custom/Arial.ttf \;
 
-# Criar fontes Arial usando Liberation Sans no diretório custom
-RUN cd /usr/share/fonts/custom && \
-    if [ -f "LiberationSans-Regular.ttf" ]; then \
-        cp LiberationSans-Regular.ttf Arial.ttf && \
-        cp LiberationSans-Bold.ttf ArialBold.ttf 2>/dev/null || cp LiberationSans-Regular.ttf ArialBold.ttf && \
-        cp LiberationSans-Italic.ttf ArialItalic.ttf 2>/dev/null || cp LiberationSans-Regular.ttf ArialItalic.ttf && \
-        cp LiberationSans-BoldItalic.ttf ArialBoldItalic.ttf 2>/dev/null || cp LiberationSans-Regular.ttf ArialBoldItalic.ttf; \
-    fi
-
-# Fallback: Se Liberation não estiver disponível, criar Arial com DejaVu
-RUN cd /usr/share/fonts/custom && \
-    if [ ! -f "Arial.ttf" ]; then \
-        find /usr/share/fonts -name "DejaVuSans.ttf" -exec cp {} Arial.ttf \; && \
-        find /usr/share/fonts -name "DejaVuSans-Bold.ttf" -exec cp {} ArialBold.ttf \; 2>/dev/null || cp Arial.ttf ArialBold.ttf && \
-        cp Arial.ttf ArialItalic.ttf && \
-        cp Arial.ttf ArialBoldItalic.ttf; \
+# Verificar se Arial.ttf foi criado com sucesso
+RUN ls -la /usr/share/fonts/custom/ && \
+    if [ ! -f "/usr/share/fonts/custom/Arial.ttf" ]; then \
+        echo "ERROR: Arial.ttf não foi criado!" && exit 1; \
+    else \
+        echo "SUCCESS: Arial.ttf criado com sucesso!"; \
     fi
 
 # Atualizar cache de fontes
 RUN fc-cache -f -v
-
-# Listar fontes disponíveis para debug
-RUN ls -la /usr/share/fonts/custom/
 
 # Garantir que /tmp existe e tem permissões corretas
 RUN chmod 777 /tmp && \
