@@ -1,91 +1,78 @@
-FROM python:3.11-slim
+# Base image - mantém Python 3.9 que funcionava
+FROM python:3.9-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Install system dependencies incluindo fontes
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    wget \
+    tar \
+    xz-utils \
+    fonts-liberation \
+    fontconfig \
+    ffmpeg \
+    git \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-# Instalar FFmpeg, fontes e dependências essenciais
-RUN apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        ffmpeg \
-        ca-certificates \
-        wget \
-        curl \
-        fontconfig \
-        fonts-dejavu-core \
-        fonts-dejavu-extra \
-        fonts-liberation \
-        fonts-noto-core \
-        fonts-noto-ui-core \
-        && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Criar diretório de fontes customizadas que o código espera
-RUN mkdir -p /usr/share/fonts/custom
-
-# Método garantido: Copiar Liberation Sans com nome Arial
-RUN cp /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf /usr/share/fonts/custom/Arial.ttf 2>/dev/null || \
+# Criar diretório de fontes custom e copiar Liberation como Arial
+RUN mkdir -p /usr/share/fonts/custom && \
+    cp /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf /usr/share/fonts/custom/Arial.ttf 2>/dev/null || \
     find /usr/share/fonts -name "*Liberation*Sans*Regular*" -exec cp {} /usr/share/fonts/custom/Arial.ttf \; || \
     find /usr/share/fonts -name "*DejaVu*Sans.ttf" -exec cp {} /usr/share/fonts/custom/Arial.ttf \;
 
-# Verificar se Arial.ttf foi criado com sucesso
-RUN ls -la /usr/share/fonts/custom/ && \
-    if [ ! -f "/usr/share/fonts/custom/Arial.ttf" ]; then \
-        echo "ERROR: Arial.ttf não foi criado!" && exit 1; \
-    else \
-        echo "SUCCESS: Arial.ttf criado com sucesso!"; \
-    fi
-
-# Atualizar cache de fontes
+# Rebuild the font cache
 RUN fc-cache -f -v
 
-# Garantir que /tmp existe e tem permissões corretas
-RUN chmod 777 /tmp && \
-    mkdir -p /tmp/downloads && \
-    chmod 777 /tmp/downloads
+# Set work directory
+WORKDIR /app
 
-# Copiar requirements.txt primeiro para otimizar cache do Docker
+# Set environment variable for Whisper cache
+ENV WHISPER_CACHE_DIR="/app/whisper_cache"
+
+# Create cache directory
+RUN mkdir -p ${WHISPER_CACHE_DIR} 
+
+# Copy the requirements file first to optimize caching
 COPY requirements.txt .
 
-# Instalar dependências Python
+# Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir jsonschema
+    pip install openai-whisper && \
+    pip install playwright && \
+    pip install jsonschema 
 
-# Copiar todo o código da aplicação
+# Create the appuser 
+RUN useradd -m appuser 
+
+# Give appuser ownership of the /app directory
+RUN chown appuser:appuser /app 
+
+# Switch to the appuser before downloading the model
+USER appuser
+RUN python -c "import os; print(os.environ.get('WHISPER_CACHE_DIR')); import whisper; whisper.load_model('base')"
+
+# Install Playwright Chromium browser as appuser
+RUN playwright install chromium
+
+# Copy the rest of the application code
 COPY . .
 
-# Configurar variáveis de ambiente
-ARG API_KEY
-ARG MAX_QUEUE_LENGTH
-ARG GUNICORN_TIMEOUT
-ARG LOCAL_STORAGE_PATH
-ARG GUNICORN_WORKERS
-ARG GUNICORN_THREADS
-ARG WORKER_CLASS
-ARG GIT_SHA
-
-ENV API_KEY=$API_KEY
-ENV MAX_QUEUE_LENGTH=$MAX_QUEUE_LENGTH
-ENV GUNICORN_TIMEOUT=$GUNICORN_TIMEOUT
-ENV LOCAL_STORAGE_PATH=/tmp
-ENV GUNICORN_WORKERS=$GUNICORN_WORKERS
-ENV GUNICORN_THREADS=$GUNICORN_THREADS
-ENV WORKER_CLASS=$WORKER_CLASS
-ENV GIT_SHA=$GIT_SHA
-
-# Variáveis de ambiente Flask
-ENV PYTHONUNBUFFERED=1
-ENV FLASK_ENV=production
-ENV FONTCONFIG_PATH=/etc/fonts
-
-# Expor a porta da aplicação
+# Expose the port the app runs on
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8080/files || exit 1
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
 
-# Comando para iniciar a aplicação
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "3", "--timeout", "12000", "--worker-class", "gthread", "--threads", "3", "app:app"]
+# Create run script
+RUN echo '#!/bin/bash\n\
+gunicorn --bind 0.0.0.0:8080 \
+    --workers ${GUNICORN_WORKERS:-2} \
+    --timeout ${GUNICORN_TIMEOUT:-300} \
+    --worker-class sync \
+    --keep-alive 80 \
+    app:app' > /app/run_gunicorn.sh && \
+    chmod +x /app/run_gunicorn.sh
+
+# Run the shell script
+CMD ["/app/run_gunicorn.sh"]
