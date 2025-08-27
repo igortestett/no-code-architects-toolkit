@@ -24,21 +24,32 @@ WORKDIR /app
 # Criar diretório de fontes customizadas que o código espera
 RUN mkdir -p /usr/share/fonts/custom
 
-# Baixar e instalar fontes Liberation no diretório correto (URL SEM colchetes)
-RUN wget -q https://github.com/liberationfonts/liberation-fonts/releases/download/2.1.5/liberation-fonts-ttf-2.1.5.tar.gz && \
-    tar -xzf liberation-fonts-ttf-2.1.5.tar.gz && \
-    cp liberation-fonts-ttf-2.1.5/*.ttf /usr/share/fonts/custom/ && \
-    rm -rf liberation-fonts-ttf-2.1.5*
+# Copiar fontes Liberation já disponíveis do sistema para o diretório custom
+RUN find /usr/share/fonts -name "Liberation*.ttf" -exec cp {} /usr/share/fonts/custom/ \;
 
 # Criar fontes Arial usando Liberation Sans no diretório custom
 RUN cd /usr/share/fonts/custom && \
-    cp LiberationSans-Regular.ttf Arial.ttf && \
-    cp LiberationSans-Bold.ttf ArialBold.ttf && \
-    cp LiberationSans-Italic.ttf ArialItalic.ttf && \
-    cp LiberationSans-BoldItalic.ttf ArialBoldItalic.ttf
+    if [ -f "LiberationSans-Regular.ttf" ]; then \
+        cp LiberationSans-Regular.ttf Arial.ttf && \
+        cp LiberationSans-Bold.ttf ArialBold.ttf 2>/dev/null || cp LiberationSans-Regular.ttf ArialBold.ttf && \
+        cp LiberationSans-Italic.ttf ArialItalic.ttf 2>/dev/null || cp LiberationSans-Regular.ttf ArialItalic.ttf && \
+        cp LiberationSans-BoldItalic.ttf ArialBoldItalic.ttf 2>/dev/null || cp LiberationSans-Regular.ttf ArialBoldItalic.ttf; \
+    fi
+
+# Fallback: Se Liberation não estiver disponível, criar Arial com DejaVu
+RUN cd /usr/share/fonts/custom && \
+    if [ ! -f "Arial.ttf" ]; then \
+        find /usr/share/fonts -name "DejaVuSans.ttf" -exec cp {} Arial.ttf \; && \
+        find /usr/share/fonts -name "DejaVuSans-Bold.ttf" -exec cp {} ArialBold.ttf \; 2>/dev/null || cp Arial.ttf ArialBold.ttf && \
+        cp Arial.ttf ArialItalic.ttf && \
+        cp Arial.ttf ArialBoldItalic.ttf; \
+    fi
 
 # Atualizar cache de fontes
 RUN fc-cache -f -v
+
+# Listar fontes disponíveis para debug
+RUN ls -la /usr/share/fonts/custom/
 
 # Garantir que /tmp existe e tem permissões corretas
 RUN chmod 777 /tmp && \
