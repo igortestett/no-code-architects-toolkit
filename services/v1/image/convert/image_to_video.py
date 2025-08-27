@@ -23,7 +23,7 @@ from config import LOCAL_STORAGE_PATH
 
 logger = logging.getLogger(__name__)
 
-def process_image_to_video(image_url, length, frame_rate, zoom_speed, job_id, webhook_url=None, enable_zoom=False):
+def process_image_to_video(image_url, length, frame_rate, zoom_speed, job_id, webhook_url=None):
     try:
         # Download the image file
         image_path = download_file(image_url, LOCAL_STORAGE_PATH)
@@ -43,45 +43,21 @@ def process_image_to_video(image_url, length, frame_rate, zoom_speed, job_id, we
         else:
             output_dims = "1080x1920"
         
-        logger.info(f"Output dimensions: {output_dims}")
-        logger.info(f"Video length: {length}s, Frame rate: {frame_rate}fps")
+        logger.info(f"Video length: {length}s, Frame rate: {frame_rate}fps, Output dimensions: {output_dims}")
         
-        # Build video filter chain based on zoom preference
-        if enable_zoom:
-            # With zoom (slower but with effect)
-            total_frames = int(length * frame_rate)
-            zoom_factor = 1 + (zoom_speed * length)
-            scale_dims = "7680:4320" if width > height else "4320:7680"
-            
-            vf_chain = f"scale={scale_dims},zoompan=z='min(1+({zoom_speed}*{length})*on/{total_frames}, {zoom_factor})':d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={output_dims}"
-            logger.info(f"Using zoom with final zoom factor: {zoom_factor}")
-        else:
-            # Without zoom (fastest processing)
-            vf_chain = f"scale={output_dims}"
-            logger.info("Zoom disabled for maximum speed")
-        
-        # Optimized FFmpeg command for maximum speed
+        # Prepare FFmpeg command for faster encoding without zoom, using crf 28 and ultrafast preset
         cmd = [
-            'ffmpeg', 
-            '-framerate', str(frame_rate), 
-            '-loop', '1', 
-            '-i', image_path,
-            '-vf', vf_chain,
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',  # Seu preset preferido
-            '-crf', '28',            # Seu CRF preferido
-            '-r', str(frame_rate), 
-            '-t', str(length), 
-            '-pix_fmt', 'yuv420p',
-            '-y',  # Overwrite output file without asking
+            'ffmpeg', '-framerate', str(frame_rate), '-loop', '1', '-i', image_path,
+            '-vf', f"scale={output_dims},fps={frame_rate}",
+            '-c:v', 'libx264', '-crf', '28', '-preset', 'ultrafast', 
+            '-r', str(frame_rate), '-t', str(length), '-pix_fmt', 'yuv420p', 
             output_path
         ]
         
-        logger.info(f"Running optimized FFmpeg command: {' '.join(cmd)}")
+        logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
         
         # Run FFmpeg command
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
         if result.returncode != 0:
             logger.error(f"FFmpeg command failed. Error: {result.stderr}")
             raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
