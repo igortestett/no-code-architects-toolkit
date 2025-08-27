@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 from app_utils import validate_payload, queue_task_wrapper
 import logging
 from services.ass_toolkit import generate_ass_captions_v1
@@ -6,8 +6,11 @@ from services.authentication import authenticate
 from services.cloud_storage import upload_file
 import os
 import requests
+import tempfile
+
 v1_media_generate_ass_bp = Blueprint('v1_media_generate_ass', __name__)
 logger = logging.getLogger(__name__)
+
 @v1_media_generate_ass_bp.route('/v1/media/generate/ass', methods=['POST'])
 @authenticate
 @validate_payload({
@@ -80,7 +83,8 @@ logger = logging.getLogger(__name__)
         },
         "language": {"type": "string"},
         "webhook_url": {"type": "string", "format": "uri"},
-        "id": {"type": "string"}
+        "id": {"type": "string"},
+        "download_direct": {"type": "boolean"}  # Novo parâmetro opcional
     },
     "additionalProperties": False,
     "required": ["media_url"],
@@ -100,10 +104,14 @@ def generate_ass_v1(job_id, data):
     language = data.get('language', 'auto')
     canvas_width = data.get('canvas_width')
     canvas_height = data.get('canvas_height')
+    download_direct = data.get('download_direct', False)  # Novo parâmetro
+    
     logger.info(f"Job {job_id}: Received ASS generation request for {media_url}")
     logger.info(f"Job {job_id}: Settings received: {settings}")
     logger.info(f"Job {job_id}: Replace rules received: {replace}")
     logger.info(f"Job {job_id}: Exclude time ranges received: {exclude_time_ranges}")
+    logger.info(f"Job {job_id}: Download direct: {download_direct}")
+    
     try:
         output = generate_ass_captions_v1(
             media_url,
@@ -116,18 +124,154 @@ def generate_ass_v1(job_id, data):
             PlayResX=canvas_width,
             PlayResY=canvas_height
         )
+        
+        # Tratamento de erros existente
         if isinstance(output, dict) and 'error' in output:
             if 'available_fonts' in output:
-                return {"error": output['error'], "available_fonts": output['available_fonts']}, "/v1/media/generate/ass", 400
+                return {"error": output['error'], "available_fonts": output['available_fonts']}, 400
             else:
-                return {"error": output['error']}, "/v1/media/generate/ass", 400
+                return {"error": output['error']}, 400
+        
         ass_path = output
         logger.info(f"Job {job_id}: ASS file generated at {ass_path}")
-        cloud_url = upload_file(ass_path)
-        logger.info(f"Job {job_id}: ASS file uploaded to cloud storage: {cloud_url}")
-        os.remove(ass_path)
-        logger.info(f"Job {job_id}: Cleaned up local ASS file")
-        return cloud_url, "/v1/media/generate/ass", 200
+        
+        # Verificar se o arquivo foi gerado corretamente
+        if not os.path.exists(ass_path):
+            logger.error(f"Job {job_id}: Generated file does not exist at {ass_path}")
+            return {"error": "Failed to generate ASS file - file not found"}, 500
+        
+        # Verificar o tamanho do arquivo
+        file_size = os.path.getsize(ass_path)
+        logger.info(f"Job {job_id}: Generated file size: {file_size} bytes")
+        
+        if file_size == 0:
+            logger.error(f"Job {job_id}: Generated file is empty")
+            return {"error": "Generated ASS file is empty"}, 500
+        
+        # Se download direto for solicitado, retornar o arquivo diretamente
+        if download_direct:
+            try:
+                # Gerar nome do arquivo baseado no job_id ou id fornecido
+                filename = f"captions_{id or job_id}.ass"
+                
+                logger.info(f"Job {job_id}: Sending file directly for download as {filename}")
+                
+                # Retornar o arquivo para download
+                return send_file(
+                    ass_path,
+                    as_attachment=True,
+                    download_name=filename,
+                    mimetype='text/plain'
+                )
+                
+            except Exception as e:
+                logger.error(f"Job {job_id}: Error sending file for download - {str(e)}")
+                # Se falhar o download direto, continuar com upload para cloud
+                pass
+        
+        # Comportamento padrão: upload para cloud storage
+        try:
+            cloud_url = upload_file(ass_path)
+            logger.info(f"Job {job_id}: ASS file uploaded to cloud storage: {cloud_url}")
+            
+            # Limpar arquivo local
+            os.remove(ass_path)
+            logger.info(f"Job {job_id}: Cleaned up local ASS file")
+            
+            # Retornar resposta estruturada com informações do arquivo
+            response_data = {
+                "success": True,
+                "download_url": cloud_url,
+                "file_type": "ass",
+                "job_id": job_id,
+                "file_size": file_size,
+                "message": "ASS file generated successfully"
+            }
+            
+            # Se webhook_url fornecido, enviar notificação (opcional)
+            if webhook_url:
+                try:
+                    webhook_payload = {
+                        "job_id": job_id,
+                        "status": "completed",
+                        "download_url": cloud_url,
+                        "file_type": "ass"
+                    }
+                    requests.post(webhook_url, json=webhook_payload, timeout=10)
+                    logger.info(f"Job {job_id}: Webhook notification sent to {webhook_url}")
+                except Exception as webhook_error:
+                    logger.warning(f"Job {job_id}: Failed to send webhook notification - {str(webhook_error)}")
+            
+            return response_data, 200
+            
+        except Exception as upload_error:
+            logger.error(f"Job {job_id}: Error uploading file to cloud storage - {str(upload_error)}")
+            
+            # Se o upload falhar, tentar retornar o arquivo diretamente como fallback
+            if os.path.exists(ass_path):
+                try:
+                    filename = f"captions_{id or job_id}.ass"
+                    logger.info(f"Job {job_id}: Cloud upload failed, sending file directly as fallback")
+                    
+                    return send_file(
+                        ass_path,
+                        as_attachment=True,
+                        download_name=filename,
+                        mimetype='text/plain'
+                    )
+                except Exception as fallback_error:
+                    logger.error(f"Job {job_id}: Fallback direct download also failed - {str(fallback_error)}")
+                    return {"error": f"Failed to upload file and direct download: {str(fallback_error)}"}, 500
+            else:
+                return {"error": f"File upload failed and local file no longer exists: {str(upload_error)}"}, 500
+        
     except Exception as e:
         logger.error(f"Job {job_id}: Error during ASS generation process - {str(e)}", exc_info=True)
-        return {"error": str(e)}, "/v1/media/generate/ass", 500
+        return {"error": str(e)}, 500
+
+
+# Endpoint adicional para download de arquivos já processados (opcional)
+@v1_media_generate_ass_bp.route('/v1/media/generate/ass/download/<job_id>', methods=['GET'])
+@authenticate
+def download_ass_file(job_id):
+    """
+    Endpoint adicional para fazer download de arquivos ASS já processados
+    usando o job_id como referência
+    """
+    try:
+        # Aqui você precisaria implementar a lógica para recuperar
+        # o arquivo do cloud storage baseado no job_id
+        # Isso pode envolver consulta a banco de dados ou cache
+        
+        # Exemplo de implementação (adapte conforme sua estrutura):
+        # file_url = get_cloud_url_by_job_id(job_id)
+        # 
+        # if not file_url:
+        #     return {"error": "File not found for the given job_id"}, 404
+        #
+        # # Download do arquivo do cloud storage
+        # response = requests.get(file_url)
+        # if response.status_code == 200:
+        #     # Criar arquivo temporário
+        #     with tempfile.NamedTemporaryFile(delete=False, suffix='.ass') as temp_file:
+        #         temp_file.write(response.content)
+        #         temp_path = temp_file.name
+        #     
+        #     return send_file(
+        #         temp_path,
+        #         as_attachment=True,
+        #         download_name=f"captions_{job_id}.ass",
+        #         mimetype='text/plain'
+        #     )
+        # else:
+        #     return {"error": "Failed to retrieve file from cloud storage"}, 500
+        
+        # Por enquanto, retornar mensagem informativa
+        return {
+            "message": "Download endpoint not fully implemented",
+            "instructions": "Use the main endpoint with 'download_direct': true for direct downloads"
+        }, 501
+        
+    except Exception as e:
+        logger.error(f"Error downloading file for job {job_id}: {str(e)}")
+        return {"error": str(e)}, 500
