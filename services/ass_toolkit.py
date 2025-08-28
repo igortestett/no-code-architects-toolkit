@@ -14,8 +14,6 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-
-
 import os
 import ffmpeg
 import logging
@@ -94,24 +92,125 @@ def get_video_resolution(video_path):
         logger.error(f"Error getting video resolution: {str(e)}. Using default resolution 384x288.")
         return 384, 288
 
+def get_font_name_from_file(font_path):
+    """
+    Extrai o nome real da fonte usando fc-scan ou fallback para nome do arquivo
+    """
+    try:
+        # Tentar usar fc-scan para pegar o nome real da fonte
+        result = subprocess.run(['fc-scan', '--format', '%{fullname}', font_path], 
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            font_name = result.stdout.strip().split(',')[0]  # Pega o primeiro nome se houver múltiplos
+            return font_name
+    except Exception:
+        pass
+    
+    # Fallback: usar o nome do arquivo sem extensão
+    return os.path.splitext(os.path.basename(font_path))[0]
+
 def get_available_fonts():
-    """Get the list of available fonts on the system."""
+    """Get the list of available fonts from custom fonts folder AND system fonts."""
+    font_names = set()
+    
+    # 1. Verificar pasta personalizada de fontes primeiro
+    custom_fonts_dir = './fonts'
+    if os.path.exists(custom_fonts_dir):
+        logger.info(f"Checking custom fonts directory: {custom_fonts_dir}")
+        for font_file in os.listdir(custom_fonts_dir):
+            if font_file.lower().endswith(('.ttf', '.otf', '.woff', '.woff2')):
+                font_path = os.path.join(custom_fonts_dir, font_file)
+                
+                # Tentar extrair nome real da fonte
+                font_name = get_font_name_from_file(font_path)
+                font_names.add(font_name)
+                
+                # Também adicionar o nome do arquivo sem extensão como fallback
+                file_name = os.path.splitext(font_file)[0]
+                font_names.add(file_name)
+                
+                logger.info(f"Found custom font: {font_name} (file: {font_file})")
+    
+    # 2. Verificar fontes do sistema usando matplotlib (se disponível)
     try:
         import matplotlib.font_manager as fm
+        font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf')
+        for font in font_list:
+            try:
+                font_prop = fm.FontProperties(fname=font)
+                font_name = font_prop.get_name()
+                font_names.add(font_name)
+            except Exception:
+                continue
+        logger.info(f"Found {len([f for f in font_list])} system fonts via matplotlib")
     except ImportError:
-        logger.error("matplotlib not installed. Install via 'pip install matplotlib'.")
-        return []
-    font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-    font_names = set()
-    for font in font_list:
-        try:
-            font_prop = fm.FontProperties(fname=font)
-            font_name = font_prop.get_name()
-            font_names.add(font_name)
-        except Exception:
-            continue
-    logger.info(f"Available fonts retrieved: {font_names}")
-    return list(font_names)
+        logger.warning("matplotlib not installed. Only using custom fonts and basic fallbacks.")
+        # Adicionar fontes básicas como fallback
+        font_names.update(['Liberation Sans', 'Liberation Serif', 'Liberation Mono', 'DejaVu Sans'])
+    
+    available_fonts = list(font_names)
+    logger.info(f"Total available fonts: {len(available_fonts)} fonts found")
+    logger.debug(f"Available fonts: {sorted(available_fonts)}")
+    return available_fonts
+
+def get_fallback_font(requested_font, available_fonts):
+    """
+    Retorna uma fonte disponível, usando fallback inteligente se necessário
+    """
+    # Verificação case-insensitive
+    available_fonts_lower = [f.lower() for f in available_fonts]
+    
+    # Se a fonte existe exatamente, usar
+    if requested_font in available_fonts:
+        logger.info(f"Font '{requested_font}' found exactly")
+        return requested_font
+    
+    # Verificação case-insensitive
+    if requested_font.lower() in available_fonts_lower:
+        # Encontrar a fonte com case correto
+        for font in available_fonts:
+            if font.lower() == requested_font.lower():
+                logger.info(f"Font '{requested_font}' found with case difference: using '{font}'")
+                return font
+    
+    # Fallbacks inteligentes
+    fallback_map = {
+        'arial': ['Arial', 'Liberation Sans', 'DejaVu Sans', 'Helvetica'],
+        'helvetica': ['Helvetica', 'Liberation Sans', 'DejaVu Sans', 'Arial'],
+        'times': ['Times', 'Times New Roman', 'Liberation Serif', 'DejaVu Serif'],
+        'times new roman': ['Times New Roman', 'Liberation Serif', 'DejaVu Serif'],
+        'courier': ['Courier', 'Courier New', 'Liberation Mono', 'DejaVu Sans Mono'],
+        'courier new': ['Courier New', 'Liberation Mono', 'DejaVu Sans Mono'],
+    }
+    
+    # Tentar fallbacks baseados no nome
+    requested_lower = requested_font.lower()
+    for key, fallbacks in fallback_map.items():
+        if key in requested_lower or requested_lower in key:
+            for fallback in fallbacks:
+                if fallback in available_fonts:
+                    logger.info(f"Using fallback font: {fallback} instead of {requested_font}")
+                    return fallback
+                # Verificação case-insensitive para fallbacks
+                for available_font in available_fonts:
+                    if available_font.lower() == fallback.lower():
+                        logger.info(f"Using fallback font: {available_font} instead of {requested_font}")
+                        return available_font
+    
+    # Se nada funcionar, usar a primeira disponível que pareça ser sans-serif
+    for font in available_fonts:
+        if any(keyword in font.lower() for keyword in ['sans', 'arial', 'helvetica']):
+            logger.warning(f"Using first available sans font: {font} instead of {requested_font}")
+            return font
+    
+    # Última tentativa: primeira fonte disponível
+    if available_fonts:
+        logger.warning(f"Using first available font: {available_fonts[0]} instead of {requested_font}")
+        return available_fonts[0]
+    
+    # Fallback absoluto
+    logger.error(f"No fonts available! Using 'Arial' as last resort instead of {requested_font}")
+    return 'Arial'
 
 def format_ass_time(seconds):
     """Convert float seconds to ASS time format H:MM:SS.cc"""
@@ -177,21 +276,21 @@ def download_captions(captions_url):
 
 def determine_alignment_code(position_str, alignment_str, x, y, video_width, video_height):
     """
-    Determine the final \an alignment code and (x,y) position based on:
+    Determine the final \\an alignment code and (x,y) position based on:
     - x,y (if provided)
     - position_str (one of top_left, top_center, ...)
     - alignment_str (left, center, right)
     - If x,y not provided, divide the video into a 3x3 grid and position accordingly.
     """
     logger.info(f"[determine_alignment_code] Inputs: position_str={position_str}, alignment_str={alignment_str}, x={x}, y={y}, video_width={video_width}, video_height={video_height}")
-
+    
     horizontal_map = {
         'left': 1,
         'center': 2,
         'right': 3
     }
-
-    # If x and y are provided, use them directly and set \an based on alignment_str
+    
+    # If x and y are provided, use them directly and set \\an based on alignment_str
     if x is not None and y is not None:
         logger.info("[determine_alignment_code] x and y provided, ignoring position and alignment for grid.")
         vertical_code = 4  # Middle row
@@ -199,7 +298,7 @@ def determine_alignment_code(position_str, alignment_str, x, y, video_width, vid
         an_code = vertical_code + (horiz_code - 1)
         logger.info(f"[determine_alignment_code] Using provided x,y. an_code={an_code}")
         return an_code, True, x, y
-
+    
     # No x,y provided: determine position and alignment based on grid
     pos_lower = position_str.lower()
     if 'top' in pos_lower:
@@ -211,7 +310,7 @@ def determine_alignment_code(position_str, alignment_str, x, y, video_width, vid
     else:
         vertical_base = 1  # Bottom row an codes start at 1
         vertical_center = (5 * video_height) / 6
-
+    
     if 'left' in pos_lower:
         left_boundary = 0
         right_boundary = video_width / 3
@@ -225,7 +324,7 @@ def determine_alignment_code(position_str, alignment_str, x, y, video_width, vid
         left_boundary = video_width / 3
         right_boundary = (2 * video_width) / 3
         center_line = video_width / 2
-
+    
     # Alignment affects horizontal position within the cell
     if alignment_str == 'left':
         final_x = left_boundary
@@ -236,10 +335,10 @@ def determine_alignment_code(position_str, alignment_str, x, y, video_width, vid
     else:
         final_x = center_line
         horiz_code = 2
-
+    
     final_y = vertical_center
     an_code = vertical_base + (horiz_code - 1)
-
+    
     logger.info(f"[determine_alignment_code] Computed final_x={final_x}, final_y={final_y}, an_code={an_code}")
     return an_code, True, int(final_x), int(final_y)
 
@@ -247,17 +346,22 @@ def create_style_line(style_options, video_resolution):
     """
     Create the style line for ASS subtitles.
     """
-    font_family = style_options.get('font_family', 'Arial')
+    requested_font = style_options.get('font_family', 'Arial')
     available_fonts = get_available_fonts()
-    if font_family not in available_fonts:
-        logger.warning(f"Font '{font_family}' not found.")
-        return {'error': f"Font '{font_family}' not available.", 'available_fonts': available_fonts}
-
+    
+    # Usar fallback inteligente ao invés de erro
+    font_family = get_fallback_font(requested_font, available_fonts)
+    
+    # Se ainda não temos fonte, retornar erro com fontes disponíveis
+    if not font_family:
+        logger.warning(f"No suitable font found for '{requested_font}'.")
+        return {'error': f"Font '{requested_font}' not available.", 'available_fonts': available_fonts}
+    
     line_color = rgb_to_ass_color(style_options.get('line_color', '#FFFFFF'))
     secondary_color = line_color
     outline_color = rgb_to_ass_color(style_options.get('outline_color', '#000000'))
     box_color = rgb_to_ass_color(style_options.get('box_color', '#000000'))
-
+    
     font_size = style_options.get('font_size', int(video_resolution[1] * 0.05))
     bold = '1' if style_options.get('bold', False) else '0'
     italic = '1' if style_options.get('italic', False) else '0'
@@ -270,20 +374,20 @@ def create_style_line(style_options, video_resolution):
     border_style = style_options.get('border_style', '1')
     outline_width = style_options.get('outline_width', '2')
     shadow_offset = style_options.get('shadow_offset', '0')
-
     margin_l = style_options.get('margin_l', '20')
     margin_r = style_options.get('margin_r', '20')
     margin_v = style_options.get('margin_v', '20')
-
+    
     # Default alignment in style (we override per event)
     alignment = 5
-
+    
     style_line = (
         f"Style: Default,{font_family},{font_size},{line_color},{secondary_color},"
         f"{outline_color},{box_color},{bold},{italic},{underline},{strikeout},"
         f"{scale_x},{scale_y},{spacing},{angle},{border_style},{outline_width},"
         f"{shadow_offset},{alignment},{margin_l},{margin_r},{margin_v},0"
     )
+    
     logger.info(f"Created ASS style line: {style_line}")
     return style_line
 
@@ -300,11 +404,12 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 """
+    
     style_line = create_style_line(style_options, video_resolution)
     if isinstance(style_line, dict) and 'error' in style_line:
         # Font-related error
         return style_line
-
+    
     ass_header += style_line + "\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     logger.info("Generated ASS header.")
     return ass_header
@@ -317,31 +422,35 @@ def handle_classic(transcription_result, style_options, replace_dict, video_reso
     """
     max_words_per_line = int(style_options.get('max_words_per_line', 0))
     all_caps = style_options.get('all_caps', False)
+    
     if style_options['font_size'] is None:
         style_options['font_size'] = int(video_resolution[1] * 0.05)
-
+    
     position_str = style_options.get('position', 'middle_center')
     alignment_str = style_options.get('alignment', 'center')
     x = style_options.get('x')
     y = style_options.get('y')
-
+    
     an_code, use_pos, final_x, final_y = determine_alignment_code(
         position_str, alignment_str, x, y,
         video_width=video_resolution[0],
         video_height=video_resolution[1]
     )
-
+    
     logger.info(f"[Classic] position={position_str}, alignment={alignment_str}, x={final_x}, y={final_y}, an_code={an_code}")
-
+    
     events = []
     for segment in transcription_result['segments']:
         text = segment['text'].strip().replace('\n', ' ')
         lines = split_lines(text, max_words_per_line)
         processed_text = '\\N'.join(process_subtitle_text(line, replace_dict, all_caps, 0) for line in lines)
+        
         start_time = format_ass_time(segment['start'])
         end_time = format_ass_time(segment['end'])
         position_tag = f"{{\\an{an_code}\\pos({final_x},{final_y})}}"
+        
         events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{position_tag}{processed_text}")
+    
     logger.info(f"Handled {len(events)} dialogues in classic style.")
     return "\n".join(events)
 
@@ -351,43 +460,48 @@ def handle_karaoke(transcription_result, style_options, replace_dict, video_reso
     """
     max_words_per_line = int(style_options.get('max_words_per_line', 0))
     all_caps = style_options.get('all_caps', False)
+    
     if style_options['font_size'] is None:
         style_options['font_size'] = int(video_resolution[1] * 0.05)
-
+    
     position_str = style_options.get('position', 'middle_center')
     alignment_str = style_options.get('alignment', 'center')
     x = style_options.get('x')
     y = style_options.get('y')
-
+    
     an_code, use_pos, final_x, final_y = determine_alignment_code(
         position_str, alignment_str, x, y,
         video_width=video_resolution[0],
         video_height=video_resolution[1]
     )
+    
     word_color = rgb_to_ass_color(style_options.get('word_color', '#FFFF00'))
-
+    
     logger.info(f"[Karaoke] position={position_str}, alignment={alignment_str}, x={final_x}, y={final_y}, an_code={an_code}")
-
+    
     events = []
     for segment in transcription_result['segments']:
         words = segment.get('words', [])
         if not words:
             continue
-
+        
         if max_words_per_line > 0:
             lines_content = []
             current_line = []
             current_line_words = 0
+            
             for w_info in words:
                 w = process_subtitle_text(w_info.get('word', ''), replace_dict, all_caps, 0)
                 duration_cs = int(round((w_info['end'] - w_info['start']) * 100))
                 highlighted_word = f"{{\\k{duration_cs}}}{w} "
                 current_line.append(highlighted_word)
                 current_line_words += 1
+                
                 if current_line_words >= max_words_per_line:
                     lines_content.append(''.join(current_line).strip())
                     current_line = []
                     current_line_words = 0
+            
             if current_line:
                 lines_content.append(''.join(current_line).strip())
         else:
@@ -398,12 +512,14 @@ def handle_karaoke(transcription_result, style_options, replace_dict, video_reso
                 highlighted_word = f"{{\\k{duration_cs}}}{w} "
                 line_content.append(highlighted_word)
             lines_content = [''.join(line_content).strip()]
-
+        
         dialogue_text = '\\N'.join(lines_content)
         start_time = format_ass_time(words[0]['start'])
         end_time = format_ass_time(words[-1]['end'])
         position_tag = f"{{\\an{an_code}\\pos({final_x},{final_y})}}"
+        
         events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{position_tag}{{\\c{word_color}}}{dialogue_text}")
+    
     logger.info(f"Handled {len(events)} dialogues in karaoke style.")
     return "\n".join(events)
 
@@ -413,47 +529,48 @@ def handle_highlight(transcription_result, style_options, replace_dict, video_re
     """
     max_words_per_line = int(style_options.get('max_words_per_line', 0))
     all_caps = style_options.get('all_caps', False)
+    
     if style_options['font_size'] is None:
         style_options['font_size'] = int(video_resolution[1] * 0.05)
-
+    
     position_str = style_options.get('position', 'middle_center')
     alignment_str = style_options.get('alignment', 'center')
     x = style_options.get('x')
     y = style_options.get('y')
-
+    
     an_code, use_pos, final_x, final_y = determine_alignment_code(
         position_str, alignment_str, x, y,
         video_width=video_resolution[0],
         video_height=video_resolution[1]
     )
-
+    
     word_color = rgb_to_ass_color(style_options.get('word_color', '#FFFF00'))
     line_color = rgb_to_ass_color(style_options.get('line_color', '#FFFFFF'))
     events = []
-
+    
     logger.info(f"[Highlight] position={position_str}, alignment={alignment_str}, x={final_x}, y={final_y}, an_code={an_code}")
-
+    
     for segment in transcription_result['segments']:
         words = segment.get('words', [])
         if not words:
             continue
-
+        
         # Process all words in the segment
         processed_words = []
         for w_info in words:
             w = process_subtitle_text(w_info.get('word', ''), replace_dict, all_caps, 0)
             if w:
                 processed_words.append((w, w_info['start'], w_info['end']))
-
+        
         if not processed_words:
             continue
-
+        
         # Split into lines if max_words_per_line is specified
         if max_words_per_line > 0:
             line_sets = [processed_words[i:i+max_words_per_line] for i in range(0, len(processed_words), max_words_per_line)]
         else:
             line_sets = [processed_words]
-
+        
         for line_set in line_sets:
             # Get the start time of the first word and end time of the last word
             line_start = line_set[0][1]
@@ -483,7 +600,7 @@ def handle_highlight(transcription_result, style_options, replace_dict, video_re
                 word_start_time = format_ass_time(w_start)
                 word_end_time = format_ass_time(w_end)
                 events.append(f"Dialogue: 1,{word_start_time},{word_end_time},Default,,0,0,0,,{position_tag}{{\\c{line_color}}}{highlighted_text}")
-
+    
     logger.info(f"Handled {len(events)} dialogues in highlight style.")
     return "\n".join(events)
 
@@ -493,42 +610,45 @@ def handle_underline(transcription_result, style_options, replace_dict, video_re
     """
     max_words_per_line = int(style_options.get('max_words_per_line', 0))
     all_caps = style_options.get('all_caps', False)
+    
     if style_options['font_size'] is None:
         style_options['font_size'] = int(video_resolution[1] * 0.05)
-
+    
     position_str = style_options.get('position', 'middle_center')
     alignment_str = style_options.get('alignment', 'center')
     x = style_options.get('x')
     y = style_options.get('y')
-
+    
     an_code, use_pos, final_x, final_y = determine_alignment_code(
         position_str, alignment_str, x, y,
         video_width=video_resolution[0],
         video_height=video_resolution[1]
     )
+    
     line_color = rgb_to_ass_color(style_options.get('line_color', '#FFFFFF'))
     events = []
-
+    
     logger.info(f"[Underline] position={position_str}, alignment={alignment_str}, x={final_x}, y={final_y}, an_code={an_code}")
-
+    
     for segment in transcription_result['segments']:
         words = segment.get('words', [])
         if not words:
             continue
+        
         processed_words = []
         for w_info in words:
             w = process_subtitle_text(w_info.get('word', ''), replace_dict, all_caps, 0)
             if w:
                 processed_words.append((w, w_info['start'], w_info['end']))
-
+        
         if not processed_words:
             continue
-
+        
         if max_words_per_line > 0:
             line_sets = [processed_words[i:i+max_words_per_line] for i in range(0, len(processed_words), max_words_per_line)]
         else:
             line_sets = [processed_words]
-
+        
         for line_set in line_sets:
             for idx, (word, w_start, w_end) in enumerate(line_set):
                 line_words = []
@@ -537,11 +657,14 @@ def handle_underline(transcription_result, style_options, replace_dict, video_re
                         line_words.append(f"{{\\u1}}{w_text}{{\\u0}}")
                     else:
                         line_words.append(w_text)
+                
                 full_text = ' '.join(line_words)
                 start_time = format_ass_time(w_start)
                 end_time = format_ass_time(w_end)
                 position_tag = f"{{\\an{an_code}\\pos({final_x},{final_y})}}"
+                
                 events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{position_tag}{{\\c{line_color}}}{full_text}")
+    
     logger.info(f"Handled {len(events)} dialogues in underline style.")
     return "\n".join(events)
 
@@ -551,43 +674,48 @@ def handle_word_by_word(transcription_result, style_options, replace_dict, video
     """
     max_words_per_line = int(style_options.get('max_words_per_line', 0))
     all_caps = style_options.get('all_caps', False)
+    
     if style_options['font_size'] is None:
         style_options['font_size'] = int(video_resolution[1] * 0.05)
-
+    
     position_str = style_options.get('position', 'middle_center')
     alignment_str = style_options.get('alignment', 'center')
     x = style_options.get('x')
     y = style_options.get('y')
-
+    
     an_code, use_pos, final_x, final_y = determine_alignment_code(
         position_str, alignment_str, x, y,
         video_width=video_resolution[0],
         video_height=video_resolution[1]
     )
+    
     word_color = rgb_to_ass_color(style_options.get('word_color', '#FFFF00'))
     events = []
-
+    
     logger.info(f"[Word-by-Word] position={position_str}, alignment={alignment_str}, x={final_x}, y={final_y}, an_code={an_code}")
-
+    
     for segment in transcription_result['segments']:
         words = segment.get('words', [])
         if not words:
             continue
-
+        
         if max_words_per_line > 0:
             grouped_words = [words[i:i+max_words_per_line] for i in range(0, len(words), max_words_per_line)]
         else:
             grouped_words = [words]
-
+        
         for word_group in grouped_words:
             for w_info in word_group:
                 w = process_subtitle_text(w_info.get('word', ''), replace_dict, all_caps, 0)
                 if not w:
                     continue
+                
                 start_time = format_ass_time(w_info['start'])
                 end_time = format_ass_time(w_info['end'])
                 position_tag = f"{{\\an{an_code}\\pos({final_x},{final_y})}}"
+                
                 events.append(f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{position_tag}{{\\c{word_color}}}{w}")
+    
     logger.info(f"Handled {len(events)} dialogues in word-by-word style.")
     return "\n".join(events)
 
@@ -611,7 +739,7 @@ def srt_to_ass(transcription_result, style_type, settings, replace_dict, video_r
         'all_caps': False,
         'max_words_per_line': 0,
         'font_size': None,
-        'font_family': 'Arial',
+        'font_family': 'Arial',  # Será convertido via fallback
         'bold': False,
         'italic': False,
         'underline': False,
@@ -624,22 +752,24 @@ def srt_to_ass(transcription_result, style_type, settings, replace_dict, video_r
         'position': 'middle_center',
         'alignment': 'center'  # default alignment
     }
+    
     style_options = {**default_style_settings, **settings}
-
+    
     if style_options['font_size'] is None:
         style_options['font_size'] = int(video_resolution[1] * 0.05)
-
+    
     ass_header = generate_ass_header(style_options, video_resolution)
     if isinstance(ass_header, dict) and 'error' in ass_header:
         # Font-related error
         return ass_header
-
+    
     handler = STYLE_HANDLERS.get(style_type.lower())
     if not handler:
         logger.warning(f"Unknown style '{style_type}', defaulting to 'classic'.")
         handler = handle_classic
-
+    
     dialogue_lines = handler(transcription_result, style_options, replace_dict, video_resolution)
+    
     logger.info("Converted transcription result to ASS format.")
     return ass_header + dialogue_lines + "\n"
 
@@ -654,6 +784,7 @@ def parse_time_string(time_str):
     import re
     if not isinstance(time_str, str):
         raise ValueError("Time value must be a string in hh:mm:ss.ms format.")
+    
     pattern = r"^(?:(\d+):)?(\d{1,2}):(\d{2}(?:\.\d{1,3})?)$"
     match = re.match(pattern, time_str)
     if not match:
@@ -662,6 +793,7 @@ def parse_time_string(time_str):
             return float(time_str)
         except Exception:
             raise ValueError(f"Invalid time string: {time_str}")
+    
     h, m, s = match.groups(default="0")
     total_seconds = int(h) * 3600 + int(m) * 60 + float(s)
     return total_seconds
@@ -671,7 +803,6 @@ def filter_subtitle_lines(sub_content, exclude_time_ranges, subtitle_type):
     Remove subtitle lines/blocks that overlap with exclude_time_ranges.
     Supports 'ass' and 'srt' subtitle_type.
     """
-
     def parse_ass_time(ass_time):
         try:
             h, m, rest = ass_time.split(":")
@@ -679,13 +810,16 @@ def filter_subtitle_lines(sub_content, exclude_time_ranges, subtitle_type):
             return int(h) * 3600 + int(m) * 60 + int(s) + int(cs) / 100
         except Exception:
             return 0
+
     def parse_time_range(rng):
         start = parse_time_string(rng['start'])
         end = parse_time_string(rng['end'])
         return {'start': start, 'end': end}
+
     parsed_ranges = [parse_time_range(rng) for rng in exclude_time_ranges]
     if not exclude_time_ranges:
         return sub_content
+
     if subtitle_type == 'ass':
         lines = sub_content.splitlines()
         filtered_lines = []
@@ -772,15 +906,15 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
             logger.warning(f"Job {job_id}: 'highlight_color' is deprecated; merging into 'word_color'.")
             style_options['word_color'] = style_options.pop('highlight_color')
 
-        # Check font availability
-        font_family = style_options.get('font_family', 'Arial')
+        # Check font availability - AGORA COM FALLBACK INTELIGENTE
+        requested_font = style_options.get('font_family', 'Arial')
         available_fonts = get_available_fonts()
-        if font_family not in available_fonts:
-            logger.warning(f"Job {job_id}: Font '{font_family}' not found.")
-            # Return font error with available_fonts
-            return {"error": f"Font '{font_family}' not available.", "available_fonts": available_fonts}
-
-        logger.info(f"Job {job_id}: Font '{font_family}' is available.")
+        
+        # Usar fallback ao invés de erro direto
+        final_font = get_fallback_font(requested_font, available_fonts)
+        style_options['font_family'] = final_font
+        
+        logger.info(f"Job {job_id}: Using font '{final_font}' (requested: '{requested_font}')")
 
         # Determine if captions is a URL or raw content
         if captions and is_url(captions):
@@ -833,6 +967,7 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
                     error_message = "Only 'classic' style is supported for SRT captions."
                     logger.error(f"Job {job_id}: {error_message}")
                     return {"error": error_message}
+                
                 transcription_result = srt_to_transcription_result(captions_content)
                 # Generate ASS based on chosen style
                 subtitle_content = process_subtitle_events(transcription_result, style_type, style_options, replace_dict, video_resolution)
@@ -874,6 +1009,7 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
             return {"error": f"Failed to save subtitle file: {str(e)}"}
 
         return subtitle_path
+
     except Exception as e:
         logger.error(f"Job {job_id}: Error in generate_ass_captions_v1: {str(e)}", exc_info=True)
         return {"error": str(e)}
