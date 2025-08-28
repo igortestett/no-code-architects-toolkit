@@ -28,14 +28,14 @@ STORAGE_PATH = "/tmp/"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Define the path to the fonts directory
-FONTS_DIR = '/usr/share/fonts/custom'
+# Define the path to the fonts directory - CORRIGIDO PARA SUA PASTA
+FONTS_DIR = './fonts'  # ← MUDANÇA AQUI: usar sua pasta fonts
 
 # Create the FONT_PATHS dictionary by reading the fonts directory
 FONT_PATHS = {}
 if os.path.exists(FONTS_DIR):
     for font_file in os.listdir(FONTS_DIR):
-        if font_file.endswith('.ttf') or font_file.endswith('.TTF'):
+        if font_file.endswith('.ttf') or font_file.endswith('.TTF') or font_file.endswith('.otf'):
             font_name = os.path.splitext(font_file)[0]
             FONT_PATHS[font_name] = os.path.join(FONTS_DIR, font_file)
 
@@ -141,13 +141,9 @@ def get_best_font(requested_font):
         logger.error(f"Using absolute fallback: {final_font} for {requested_font}")
         return final_font, 'system'
     
-    # If all else fails, raise an error with available fonts
-    error_msg = f"Font '{requested_font}' not available."
-    available_fonts = list(FONT_PATHS.keys()) + SYSTEM_FONTS[:20]  # Limit to first 20 system fonts
-    raise ValueError({
-        "error": error_msg,
-        "available_fonts": sorted(available_fonts)
-    })
+    # If all else fails, just return the requested font and let FFmpeg handle it
+    logger.error(f"No suitable fonts found, returning requested font: {requested_font}")
+    return requested_font, 'unknown'
 
 # Match font files with fontconfig names
 def match_fonts():
@@ -236,7 +232,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
             logger.info(f"Job {job_id}: Generated ASS style string: {style_string}")
-
+        
         if caption_srt.startswith("https"):
             # Download the file if caption_srt is a URL
             logger.info(f"Job {job_id}: Downloading caption file from {caption_srt}")
@@ -270,9 +266,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             logger.error(f"Job {job_id}: {str(e)}")
             raise ValueError(e.args[0])
 
-        # For ASS subtitles, use simple subtitles filter
+        # For ASS subtitles, use simple subtitles filter with fontsdir
         if subtitle_extension == '.ass':
-            subtitle_filter = f"subtitles='{srt_path}'"
+            # MUDANÇA AQUI: Adicionar fontsdir apontando para sua pasta fonts
+            subtitle_filter = f"subtitles='{srt_path}:fontsdir={FONTS_DIR}'"
             logger.info(f"Job {job_id}: Using ASS subtitle filter: {subtitle_filter}")
         else:
             # Construct FFmpeg filter options for subtitles with detailed styling
@@ -303,7 +300,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             }
             # Add only populated options to the subtitle filter
             subtitle_filter += ','.join(f"{k}={v}" for k, v in style_options.items() if v is not None)
-            subtitle_filter += "'"
+            subtitle_filter += f":fontsdir={FONTS_DIR}'"  # ← ADICIONAR TAMBÉM AQUI
             logger.info(f"Job {job_id}: Using subtitle filter: {subtitle_filter}")
 
         try:
@@ -327,12 +324,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         # The upload process will be handled by the calling function
         return output_path
-        
-        # Clean up local files (this code won't be reached due to return above)
-        # os.remove(video_path)
-        # os.remove(srt_path)
-        # os.remove(output_path)
-        # logger.info(f"Job {job_id}: Local files cleaned up")
         
     except Exception as e:
         logger.error(f"Job {job_id}: Error in process_captioning: {str(e)}")
