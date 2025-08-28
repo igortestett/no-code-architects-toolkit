@@ -115,35 +115,37 @@ logger = logging.getLogger(__name__)
 @queue_task_wrapper(bypass_queue=False)
 def ffmpeg_api(job_id, data):
     logger.info(f"Job {job_id}: Received flexible FFmpeg request")
-
     try:
         output_filenames, metadata = process_ffmpeg_compose(data, job_id)
         
-        # Upload output files to GCP and create result array
+        # Mover arquivos para /tmp e criar URLs de download locais
         output_urls = []
         for i, output_filename in enumerate(output_filenames):
             if os.path.exists(output_filename):
-                upload_url = upload_file(output_filename)
-                output_info = {"file_url": upload_url}
+                # Gerar nome final para download
+                final_filename = f"{job_id}_output_{i}.mp4"  # ou extrair extensão
+                final_path = f"/tmp/{final_filename}"
+                
+                # Mover arquivo para /tmp com nome final
+                if output_filename != final_path:
+                    import shutil
+                    shutil.move(output_filename, final_path)
+                
+                # Criar URL de download local
+                base_url = request.url_root.rstrip('/')
+                download_url = f"{base_url}/download/{final_filename}"
+                
+                output_info = {"file_url": download_url}
                 
                 if metadata and i < len(metadata):
-                    output_metadata = metadata[i]
-                    if 'thumbnail' in output_metadata:
-                        thumbnail_path = output_metadata['thumbnail']
-                        if os.path.exists(thumbnail_path):
-                            thumbnail_url = upload_file(thumbnail_path)
-                            del output_metadata['thumbnail']
-                            output_metadata['thumbnail_url'] = thumbnail_url
-                            os.remove(thumbnail_path)  # Clean up local thumbnail file
-                    output_info.update(output_metadata)
+                    output_info.update(metadata[i])
                 
                 output_urls.append(output_info)
-                os.remove(output_filename)  # Clean up local output file after upload
             else:
                 raise Exception(f"Expected output file {output_filename} not found")
-
-        return output_urls, "/v1/ffmpeg/compose", 200
+        
+        return (output_urls, "/v1/ffmpeg/compose", 200)
         
     except Exception as e:
         logger.error(f"Job {job_id}: Error processing FFmpeg request - {str(e)}")
-        return str(e), "/v1/ffmpeg/compose", 500
+        return ({"error": str(e)}, "/v1/ffmpeg/compose", 500)
