@@ -14,16 +14,13 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-
-
-from flask import Blueprint, jsonify
+from flask import Blueprint, request
 from app_utils import validate_payload, queue_task_wrapper
 import logging
+import shutil
 from services.ass_toolkit import generate_ass_captions_v1
 from services.authentication import authenticate
-from services.cloud_storage import upload_file
 import os
-import requests  # Ensure requests is imported for webhook handling
 
 v1_video_caption_bp = Blueprint('v1_video/caption', __name__)
 logger = logging.getLogger(__name__)
@@ -114,39 +111,27 @@ def caption_video_v1(job_id, data):
     webhook_url = data.get('webhook_url')
     id = data.get('id')
     language = data.get('language', 'auto')
-
+    
     logger.info(f"Job {job_id}: Received v1 captioning request for {video_url}")
     logger.info(f"Job {job_id}: Settings received: {settings}")
     logger.info(f"Job {job_id}: Replace rules received: {replace}")
     logger.info(f"Job {job_id}: Exclude time ranges received: {exclude_time_ranges}")
-
+    
     try:
-        # Do NOT combine position and alignment. Keep them separate.
-        # Just pass settings directly to process_captioning_v1.
-        # This ensures position and alignment remain independent keys.
-        
         # Process video with the enhanced v1 service
         output = generate_ass_captions_v1(video_url, captions, settings, replace, exclude_time_ranges, job_id, language)
         
         if isinstance(output, dict) and 'error' in output:
-            # Check if this is a font-related error by checking for 'available_fonts' key
             if 'available_fonts' in output:
-                # Font error scenario
-                return {"error": output['error'], "available_fonts": output['available_fonts']}, "/v1/video/caption", 400
+                return ({"error": output['error'], "available_fonts": output['available_fonts']}, "/v1/video/caption", 400)
             else:
-                # Non-font error scenario, do not return available_fonts
-                return {"error": output['error']}, "/v1/video/caption", 400
-
+                return ({"error": output['error']}, "/v1/video/caption", 400)
+        
         # If processing was successful, output is the ASS file path
         ass_path = output
         logger.info(f"Job {job_id}: ASS file generated at {ass_path}")
-
-        # Prepare output filename and path for the rendered video
-        output_filename = f"{job_id}_captioned.mp4"
-        output_path = os.path.join(os.path.dirname(ass_path), output_filename)
-
-        # Download the video (if not already local)
-        video_path = None
+        
+        # Download the video
         try:
             from services.file_management import download_file
             from config import LOCAL_STORAGE_PATH
@@ -154,34 +139,58 @@ def caption_video_v1(job_id, data):
             logger.info(f"Job {job_id}: Video downloaded to {video_path}")
         except Exception as e:
             logger.error(f"Job {job_id}: Video download error: {str(e)}")
-            return {"error": str(e)}, "/v1/video/caption", 500
-
-        # Render the video with subtitles using FFmpeg
+            return ({"error": str(e)}, "/v1/video/caption", 500)
+        
+        # Prepare final output path in /tmp
+        final_filename = f"{job_id}_captioned.mp4"
+        final_output_path = f"/tmp/{final_filename}"
+        
+        # Ensure /tmp exists
+        os.makedirs("/tmp", exist_ok=True)
+        
+        # Render video with subtitles using FFmpeg
         try:
             import ffmpeg
             ffmpeg.input(video_path).output(
-                output_path,
-                vf=f"subtitles='{ass_path}'",
+                final_output_path,
+                vf=f"subtitles='{ass_path}:fontsdir=./fonts'",
                 acodec='copy'
-            ).run(overwrite_output=True)
-            logger.info(f"Job {job_id}: FFmpeg processing completed. Output saved to {output_path}")
+            ).overwrite_output().run()
+            logger.info(f"Job {job_id}: FFmpeg processing completed. Output saved to {final_output_path}")
         except Exception as e:
             logger.error(f"Job {job_id}: FFmpeg error: {str(e)}")
-            return {"error": f"FFmpeg error: {str(e)}"}, "/v1/video/caption", 500
-
+            return ({"error": f"FFmpeg error: {str(e)}"}, "/v1/video/caption", 500)
+        
         # Clean up the ASS file after use
-        os.remove(ass_path)
-
-        # Upload the captioned video
-        cloud_url = upload_file(output_path)
-        logger.info(f"Job {job_id}: Captioned video uploaded to cloud storage: {cloud_url}")
-
-        # Clean up the output file after upload
-        os.remove(output_path)
-        logger.info(f"Job {job_id}: Cleaned up local output file")
-
-        return cloud_url, "/v1/video/caption", 200
-
+        if os.path.exists(ass_path):
+            os.remove(ass_path)
+            logger.info(f"Job {job_id}: Cleaned up ASS file: {ass_path}")
+        
+        # Clean up video file
+        if os.path.exists(video_path):
+            os.remove(video_path)
+            logger.info(f"Job {job_id}: Cleaned up video file: {video_path}")
+        
+        # Verify final output exists and is not empty
+        if not os.path.exists(final_output_path):
+            logger.error(f"Job {job_id}: Final output file not created: {final_output_path}")
+            return ({"error": "Output file not created"}, "/v1/video/caption", 500)
+        
+        file_size = os.path.getsize(final_output_path)
+        if file_size == 0:
+            logger.error(f"Job {job_id}: Final output file is empty")
+            return ({"error": "Generated file is empty"}, "/v1/video/caption", 500)
+        
+        logger.info(f"Job {job_id}: Final output ready: {final_output_path} ({file_size} bytes)")
+        
+        # Generate download URL
+        base_url = request.url_root.rstrip('/')
+        download_url = f"{base_url}/download/{final_filename}"
+        
+        logger.info(f"Job {job_id}: Generated download URL: {download_url}")
+        
+        return (download_url, "/v1/video/caption", 200)
+        
     except Exception as e:
         logger.error(f"Job {job_id}: Error during captioning process - {str(e)}", exc_info=True)
-        return {"error": str(e)}, "/v1/video/caption", 500
+        return ({"error": str(e)}, "/v1/video/caption", 500)
