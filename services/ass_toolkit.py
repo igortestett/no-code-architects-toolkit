@@ -23,8 +23,8 @@ from datetime import timedelta
 import srt
 import re
 from services.file_management import download_file
-from services.cloud_storage import upload_file  # Ensure this import is present
-import requests  # Ensure requests is imported for webhook handling
+from services.cloud_storage import upload_file
+import requests
 from urllib.parse import urlparse
 from config import LOCAL_STORAGE_PATH
 
@@ -49,6 +49,16 @@ POSITION_ALIGNMENT_MAP = {
     "top_right": 9
 }
 
+# Cache global para o modelo Whisper
+_whisper_model_cache = {}
+
+def get_cached_whisper_model(model_name="small"):
+    """Cache do modelo Whisper para evitar recarregamentos"""
+    if model_name not in _whisper_model_cache:
+        _whisper_model_cache[model_name] = whisper.load_model(model_name)
+        logger.info(f"Loaded and cached Whisper model: {model_name}")
+    return _whisper_model_cache[model_name]
+
 def rgb_to_ass_color(rgb_color):
     """Convert RGB hex to ASS (&HAABBGGRR)."""
     if isinstance(rgb_color, str):
@@ -62,13 +72,16 @@ def rgb_to_ass_color(rgb_color):
 
 def generate_transcription(video_path, language='auto'):
     try:
-        model = whisper.load_model("base")
+        # Usar modelo small com cache e parâmetros otimizados
+        model = get_cached_whisper_model("small")
         transcription_options = {
             'word_timestamps': True,
-            'verbose': True,
+            'verbose': False,  # Reduzir logs
+            'condition_on_previous_text': False,  # Pode acelerar
         }
         if language != 'auto':
             transcription_options['language'] = language
+        
         result = model.transcribe(video_path, **transcription_options)
         logger.info(f"Transcription generated successfully for video: {video_path}")
         return result
@@ -76,18 +89,16 @@ def generate_transcription(video_path, language='auto'):
         logger.error(f"Error in transcription: {str(e)}")
         raise
 
-def get_video_resolution(video_path):
+def get_video_resolution_fast(video_path):
+    """Versão otimizada para obter resolução rapidamente"""
     try:
-        probe = ffmpeg.probe(video_path)
-        video_streams = [s for s in probe['streams'] if s['codec_type'] == 'video']
-        if video_streams:
-            width = int(video_streams[0]['width'])
-            height = int(video_streams[0]['height'])
-            logger.info(f"Video resolution determined: {width}x{height}")
-            return width, height
-        else:
-            logger.warning(f"No video streams found for {video_path}. Using default resolution 384x288.")
-            return 384, 288
+        # Usar apenas o que precisamos do probe para ser mais rápido
+        probe = ffmpeg.probe(video_path, select_streams='v:0', show_entries='stream=width,height')
+        video_stream = probe['streams'][0]
+        width = int(video_stream['width'])
+        height = int(video_stream['height'])
+        logger.info(f"Video resolution determined: {width}x{height}")
+        return width, height
     except Exception as e:
         logger.error(f"Error getting video resolution: {str(e)}. Using default resolution 384x288.")
         return 384, 288
@@ -150,7 +161,6 @@ def get_available_fonts():
     
     available_fonts = list(font_names)
     logger.info(f"Total available fonts: {len(available_fonts)} fonts found")
-    logger.debug(f"Available fonts: {sorted(available_fonts)}")
     return available_fonts
 
 def get_fallback_font(requested_font, available_fonts):
@@ -739,7 +749,7 @@ def srt_to_ass(transcription_result, style_type, settings, replace_dict, video_r
         'all_caps': False,
         'max_words_per_line': 0,
         'font_size': None,
-        'font_family': 'Arial',  # Será convertido via fallback
+        'font_family': 'Arial',
         'bold': False,
         'italic': False,
         'underline': False,
@@ -750,7 +760,7 @@ def srt_to_ass(transcription_result, style_type, settings, replace_dict, video_r
         'x': None,
         'y': None,
         'position': 'middle_center',
-        'alignment': 'center'  # default alignment
+        'alignment': 'center'
     }
     
     style_options = {**default_style_settings, **settings}
@@ -874,8 +884,7 @@ def normalize_exclude_time_ranges(exclude_time_ranges):
 def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_time_ranges, job_id, language='auto', PlayResX=None, PlayResY=None):
     """
     Captioning process with transcription fallback and multiple styles.
-    Integrates with the updated logic for positioning and alignment.
-    If PlayResX and PlayResY are provided, use them for ASS generation; otherwise, get from video.
+    Versão otimizada com cache do modelo Whisper e outras melhorias de performance.
     """
     try:
         # Normalize exclude_time_ranges to ensure start/end are floats
@@ -906,7 +915,7 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
             logger.warning(f"Job {job_id}: 'highlight_color' is deprecated; merging into 'word_color'.")
             style_options['word_color'] = style_options.pop('highlight_color')
 
-        # Check font availability - AGORA COM FALLBACK INTELIGENTE
+        # Check font availability
         requested_font = style_options.get('font_family', 'Arial')
         available_fonts = get_available_fonts()
         
@@ -936,15 +945,14 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
             logger.info(f"Job {job_id}: Video downloaded to {video_path}")
         except Exception as e:
             logger.error(f"Job {job_id}: Video download error: {str(e)}")
-            # For non-font errors, do NOT include available_fonts
             return {"error": str(e)}
 
-        # Get video resolution, unless provided
+        # Get video resolution, unless provided - usando versão otimizada
         if PlayResX is not None and PlayResY is not None:
             video_resolution = (PlayResX, PlayResY)
             logger.info(f"Job {job_id}: Using provided PlayResX/PlayResY = {PlayResX}x{PlayResY}")
         else:
-            video_resolution = get_video_resolution(video_path)
+            video_resolution = get_video_resolution_fast(video_path)
             logger.info(f"Job {job_id}: Video resolution detected = {video_resolution[0]}x{video_resolution[1]}")
 
         # Determine style type
@@ -973,8 +981,8 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
                 subtitle_content = process_subtitle_events(transcription_result, style_type, style_options, replace_dict, video_resolution)
                 subtitle_type = 'ass'
         else:
-            # No captions provided, generate transcription
-            logger.info(f"Job {job_id}: No captions provided, generating transcription.")
+            # No captions provided, generate transcription - usando modelo small com cache
+            logger.info(f"Job {job_id}: No captions provided, generating transcription with cached model.")
             transcription_result = generate_transcription(video_path, language=language)
             # Generate ASS based on chosen style
             subtitle_content = process_subtitle_events(transcription_result, style_type, style_options, replace_dict, video_resolution)
