@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
     "type": "object",
     "properties": {
         "video_url": {"type": "string", "format": "uri"},
-        "captions": {"type": "string", "format": "uri"},  # Now expects ASS file URL
+        "captions": {"type": "string", "format": "uri"},  # ASS file URL
         "webhook_url": {"type": "string", "format": "uri"},
         "id": {"type": "string"}
     },
@@ -127,7 +127,7 @@ def caption_video_v1(job_id, data):
                     "video_url": cloud_url,
                     "original_video": video_url,
                     "captions_file": ass_file_url,
-                    "processing_time": "N/A"  # Could add timing if needed
+                    "local_output_path": output_path  # Include local path for direct access
                 }
                 
                 response = requests.post(webhook_url, json=webhook_payload, timeout=10)
@@ -136,25 +136,30 @@ def caption_video_v1(job_id, data):
             except Exception as webhook_error:
                 logger.warning(f"Job {job_id}: Webhook notification failed - {str(webhook_error)}")
         
-        # Clean up local files
-        cleanup_files = [video_path, ass_path, output_path]
-        for file_path in cleanup_files:
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except Exception as cleanup_error:
-                logger.warning(f"Job {job_id}: Failed to remove {file_path}: {str(cleanup_error)}")
+        # FILES KEPT - NO CLEANUP PERFORMED
+        # The following files remain accessible:
+        # - video_path: Original downloaded video
+        # - ass_path: Downloaded ASS subtitle file  
+        # - output_path: Final processed video with subtitles
         
-        logger.info(f"Job {job_id}: Job completed successfully, files cleaned up")
+        logger.info(f"Job {job_id}: Job completed successfully. Files retained at:")
+        logger.info(f"  - Original video: {video_path}")
+        logger.info(f"  - ASS file: {ass_path}")
+        logger.info(f"  - Processed video: {output_path}")
         
-        # Return success response
+        # Return success response with file paths
         response_data = {
             "success": True,
             "video_url": cloud_url,
             "job_id": job_id,
-            "message": "Video successfully processed with provided subtitles",
+            "message": "Video successfully processed and all files retained",
             "original_video": video_url,
-            "subtitles_used": ass_file_url
+            "subtitles_used": ass_file_url,
+            "local_files": {
+                "original_video_path": video_path,
+                "ass_file_path": ass_path,
+                "processed_video_path": output_path
+            }
         }
         
         return response_data, "/v1/video/caption", 200
