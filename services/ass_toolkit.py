@@ -14,6 +14,8 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+
+
 import os
 import ffmpeg
 import logging
@@ -49,16 +51,6 @@ POSITION_ALIGNMENT_MAP = {
     "top_right": 9
 }
 
-
-
-
-
-
-
-
-
-
-
 def rgb_to_ass_color(rgb_color):
     """Convert RGB hex to ASS (&HAABBGGRR)."""
     if isinstance(rgb_color, str):
@@ -73,15 +65,12 @@ def rgb_to_ass_color(rgb_color):
 def generate_transcription(video_path, language='auto'):
     try:
         model = whisper.load_model("base")
-
         transcription_options = {
             'word_timestamps': True,
             'verbose': True,
-
         }
         if language != 'auto':
             transcription_options['language'] = language
-
         result = model.transcribe(video_path, **transcription_options)
         logger.info(f"Transcription generated successfully for video: {video_path}")
         return result
@@ -90,7 +79,6 @@ def generate_transcription(video_path, language='auto'):
         raise
 
 def get_video_resolution(video_path):
-
     try:
         probe = ffmpeg.probe(video_path)
         video_streams = [s for s in probe['streams'] if s['codec_type'] == 'video']
@@ -106,125 +94,125 @@ def get_video_resolution(video_path):
         logger.error(f"Error getting video resolution: {str(e)}. Using default resolution 384x288.")
         return 384, 288
 
-def get_font_name_from_file(font_path):
-    """
-    Extrai o nome real da fonte usando fc-scan ou fallback para nome do arquivo
-    """
-    try:
-        # Tentar usar fc-scan para pegar o nome real da fonte
-        result = subprocess.run(['fc-scan', '--format', '%{fullname}', font_path], 
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            font_name = result.stdout.strip().split(',')[0]  # Pega o primeiro nome se houver múltiplos
-            return font_name
-    except Exception:
-        pass
 
-    # Fallback: usar o nome do arquivo sem extensão
-    return os.path.splitext(os.path.basename(font_path))[0]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def get_available_fonts():
-    """Get the list of available fonts from custom fonts folder AND system fonts."""
-    font_names = set()
+    """Get the list of available fonts on the system."""
 
-    # 1. Verificar pasta personalizada de fontes primeiro
-    custom_fonts_dir = './fonts'
-    if os.path.exists(custom_fonts_dir):
-        logger.info(f"Checking custom fonts directory: {custom_fonts_dir}")
-        for font_file in os.listdir(custom_fonts_dir):
-            if font_file.lower().endswith(('.ttf', '.otf', '.woff', '.woff2')):
-                font_path = os.path.join(custom_fonts_dir, font_file)
 
-                # Tentar extrair nome real da fonte
-                font_name = get_font_name_from_file(font_path)
-                font_names.add(font_name)
 
-                # Também adicionar o nome do arquivo sem extensão como fallback
-                file_name = os.path.splitext(font_file)[0]
-                font_names.add(file_name)
 
-                logger.info(f"Found custom font: {font_name} (file: {font_file})")
 
-    # 2. Verificar fontes do sistema usando matplotlib (se disponível)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     try:
         import matplotlib.font_manager as fm
-        font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf')
-        for font in font_list:
-            try:
-                font_prop = fm.FontProperties(fname=font)
-                font_name = font_prop.get_name()
-                font_names.add(font_name)
-            except Exception:
-                continue
-        logger.info(f"Found {len([f for f in font_list])} system fonts via matplotlib")
+
+
+
+
+
+
+
+
+
     except ImportError:
-        logger.warning("matplotlib not installed. Only using custom fonts and basic fallbacks.")
-        # Adicionar fontes básicas como fallback
-        font_names.update(['Liberation Sans', 'Liberation Serif', 'Liberation Mono', 'DejaVu Sans'])
+        logger.error("matplotlib not installed. Install via 'pip install matplotlib'.")
+        return []
+    font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf')
+    font_names = set()
+    for font in font_list:
+        try:
+            font_prop = fm.FontProperties(fname=font)
+            font_name = font_prop.get_name()
+            font_names.add(font_name)
+        except Exception:
+            continue
+    logger.info(f"Available fonts retrieved: {font_names}")
+    return list(font_names)
 
-    available_fonts = list(font_names)
-    logger.info(f"Total available fonts: {len(available_fonts)} fonts found")
-    logger.debug(f"Available fonts: {sorted(available_fonts)}")
-    return available_fonts
 
-def get_fallback_font(requested_font, available_fonts):
-    """
-    Retorna uma fonte disponível, usando fallback inteligente se necessário
-    """
-    # Verificação case-insensitive
-    available_fonts_lower = [f.lower() for f in available_fonts]
 
-    # Se a fonte existe exatamente, usar
-    if requested_font in available_fonts:
-        logger.info(f"Font '{requested_font}' found exactly")
-        return requested_font
 
-    # Verificação case-insensitive
-    if requested_font.lower() in available_fonts_lower:
-        # Encontrar a fonte com case correto
-        for font in available_fonts:
-            if font.lower() == requested_font.lower():
-                logger.info(f"Font '{requested_font}' found with case difference: using '{font}'")
-                return font
 
-    # Fallbacks inteligentes
-    fallback_map = {
-        'arial': ['Arial', 'Liberation Sans', 'DejaVu Sans', 'Helvetica'],
-        'helvetica': ['Helvetica', 'Liberation Sans', 'DejaVu Sans', 'Arial'],
-        'times': ['Times', 'Times New Roman', 'Liberation Serif', 'DejaVu Serif'],
-        'times new roman': ['Times New Roman', 'Liberation Serif', 'DejaVu Serif'],
-        'courier': ['Courier', 'Courier New', 'Liberation Mono', 'DejaVu Sans Mono'],
-        'courier new': ['Courier New', 'Liberation Mono', 'DejaVu Sans Mono'],
-    }
 
-    # Tentar fallbacks baseados no nome
-    requested_lower = requested_font.lower()
-    for key, fallbacks in fallback_map.items():
-        if key in requested_lower or requested_lower in key:
-            for fallback in fallbacks:
-                if fallback in available_fonts:
-                    logger.info(f"Using fallback font: {fallback} instead of {requested_font}")
-                    return fallback
-                # Verificação case-insensitive para fallbacks
-                for available_font in available_fonts:
-                    if available_font.lower() == fallback.lower():
-                        logger.info(f"Using fallback font: {available_font} instead of {requested_font}")
-                        return available_font
 
-    # Se nada funcionar, usar a primeira disponível que pareça ser sans-serif
-    for font in available_fonts:
-        if any(keyword in font.lower() for keyword in ['sans', 'arial', 'helvetica']):
-            logger.warning(f"Using first available sans font: {font} instead of {requested_font}")
-            return font
 
-    # Última tentativa: primeira fonte disponível
-    if available_fonts:
-        logger.warning(f"Using first available font: {available_fonts[0]} instead of {requested_font}")
-        return available_fonts[0]
 
-    # Fallback absoluto
-    logger.error(f"No fonts available! Using 'Arial' as last resort instead of {requested_font}")
-    return 'Arial'
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def format_ass_time(seconds):
     """Convert float seconds to ASS time format H:MM:SS.cc"""
@@ -290,7 +278,7 @@ def download_captions(captions_url):
 
 def determine_alignment_code(position_str, alignment_str, x, y, video_width, video_height):
     """
-    Determine the final \\an alignment code and (x,y) position based on:
+    Determine the final \an alignment code and (x,y) position based on:
     - x,y (if provided)
     - position_str (one of top_left, top_center, ...)
     - alignment_str (left, center, right)
@@ -304,7 +292,7 @@ def determine_alignment_code(position_str, alignment_str, x, y, video_width, vid
         'right': 3
     }
 
-    # If x and y are provided, use them directly and set \\an based on alignment_str
+    # If x and y are provided, use them directly and set \an based on alignment_str
     if x is not None and y is not None:
         logger.info("[determine_alignment_code] x and y provided, ignoring position and alignment for grid.")
         vertical_code = 4  # Middle row
@@ -360,16 +348,16 @@ def create_style_line(style_options, video_resolution):
     """
     Create the style line for ASS subtitles.
     """
-    requested_font = style_options.get('font_family', 'Arial')
+    font_family = style_options.get('font_family', 'Arial')
     available_fonts = get_available_fonts()
+    if font_family not in available_fonts:
+        logger.warning(f"Font '{font_family}' not found.")
+        return {'error': f"Font '{font_family}' not available.", 'available_fonts': available_fonts}
 
-    # Usar fallback inteligente ao invés de erro
-    font_family = get_fallback_font(requested_font, available_fonts)
 
-    # Se ainda não temos fonte, retornar erro com fontes disponíveis
-    if not font_family:
-        logger.warning(f"No suitable font found for '{requested_font}'.")
-        return {'error': f"Font '{requested_font}' not available.", 'available_fonts': available_fonts}
+
+
+
 
     line_color = rgb_to_ass_color(style_options.get('line_color', '#FFFFFF'))
     secondary_color = line_color
@@ -388,6 +376,7 @@ def create_style_line(style_options, video_resolution):
     border_style = style_options.get('border_style', '1')
     outline_width = style_options.get('outline_width', '2')
     shadow_offset = style_options.get('shadow_offset', '0')
+
     margin_l = style_options.get('margin_l', '20')
     margin_r = style_options.get('margin_r', '20')
     margin_v = style_options.get('margin_v', '20')
@@ -753,7 +742,7 @@ def srt_to_ass(transcription_result, style_type, settings, replace_dict, video_r
         'all_caps': False,
         'max_words_per_line': 0,
         'font_size': None,
-        'font_family': 'Arial',  # Será convertido via fallback
+        'font_family': 'Arial',
         'bold': False,
         'italic': False,
         'underline': False,
@@ -817,6 +806,7 @@ def filter_subtitle_lines(sub_content, exclude_time_ranges, subtitle_type):
     Remove subtitle lines/blocks that overlap with exclude_time_ranges.
     Supports 'ass' and 'srt' subtitle_type.
     """
+
     def parse_ass_time(ass_time):
         try:
             h, m, rest = ass_time.split(":")
@@ -920,15 +910,15 @@ def generate_ass_captions_v1(video_url, captions, settings, replace, exclude_tim
             logger.warning(f"Job {job_id}: 'highlight_color' is deprecated; merging into 'word_color'.")
             style_options['word_color'] = style_options.pop('highlight_color')
 
-        # Check font availability - AGORA COM FALLBACK INTELIGENTE
-        requested_font = style_options.get('font_family', 'Arial')
+        # Check font availability
+        font_family = style_options.get('font_family', 'Arial')
         available_fonts = get_available_fonts()
+        if font_family not in available_fonts:
+            logger.warning(f"Job {job_id}: Font '{font_family}' not found.")
+            # Return font error with available_fonts
+            return {"error": f"Font '{font_family}' not available.", "available_fonts": available_fonts}
 
-        # Usar fallback ao invés de erro direto
-        final_font = get_fallback_font(requested_font, available_fonts)
-        style_options['font_family'] = final_font
-
-        logger.info(f"Job {job_id}: Using font '{final_font}' (requested: '{requested_font}')")
+        logger.info(f"Job {job_id}: Font '{font_family}' is available.")
 
         # Determine if captions is a URL or raw content
         if captions and is_url(captions):
