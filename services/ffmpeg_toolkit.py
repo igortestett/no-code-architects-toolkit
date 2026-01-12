@@ -65,25 +65,20 @@ def process_video_combination(media_urls, job_id, webhook_url=None):
             input_filename = download_file(url, os.path.join(STORAGE_PATH, f"{job_id}_input_{i}"))
             input_files.append(input_filename)
 
-        # Generate an absolute path concat list file for FFmpeg
-        concat_file_path = os.path.join(STORAGE_PATH, f"{job_id}_concat_list.txt")
-        with open(concat_file_path, 'w') as concat_file:
-            for input_file in input_files:
-                # Write absolute paths to the concat list
-                concat_file.write(f"file '{os.path.abspath(input_file)}'\n")
-
-        # Use the concat demuxer to concatenate the videos
+        # Use the concat filter to concatenate the videos
+        # This re-encodes the video, preventing issues with mismatched streams/codecs
+        # and "black screen" at the end.
+        input_streams = [ffmpeg.input(f) for f in input_files]
         (
-            ffmpeg.input(concat_file_path, format='concat', safe=0).
-                output(output_path, c='copy').
-                run(overwrite_output=True)
+            ffmpeg
+            .concat(*input_streams, v=1, a=1)
+            .output(output_path)
+            .run(overwrite_output=True)
         )
 
         # Clean up input files
         for f in input_files:
             os.remove(f)
-            
-        os.remove(concat_file_path)  # Remove the concat list file after the operation
 
         print(f"Video combination successful: {output_path}")
 
