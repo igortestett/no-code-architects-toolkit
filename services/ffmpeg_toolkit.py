@@ -113,12 +113,16 @@ def process_video_combination(media_urls, job_id, webhook_url=None):
             input_streams.append(v)
             input_streams.append(a)
 
-        (
-            ffmpeg
-            .concat(*input_streams, v=1, a=1)
-            .output(output_path)
-            .run(overwrite_output=True)
-        )
+        try:
+            (
+                ffmpeg
+                .concat(*input_streams, v=1, a=1)
+                .output(output_path)
+                .run(overwrite_output=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as e:
+            print(f"FFmpeg error: {e.stderr.decode('utf8')}")
+            raise e
 
         # Clean up input files
         for f in input_files:
