@@ -21,6 +21,7 @@ import ffmpeg
 import requests
 import subprocess
 import json
+import concurrent.futures
 from services.file_management import download_file
 
 # Set the default local storage directory
@@ -87,69 +88,81 @@ def process_video_combination(media_urls, job_id, webhook_url=None):
             input_filename = download_file(url, os.path.join(STORAGE_PATH, f"{job_id}_input_{i}"))
             input_files.append(input_filename)
 
-        # The filter graph can become too large/complex for ffmpeg if we have many inputs (e.g., > 50).
-        # To avoid this, we process the videos in batches of 20.
-        BATCH_SIZE = 20
+        # Optimization: Normalize videos in parallel then concat stream-copy
+        # This avoids the O(N) complexity of filter graphs and speeds up processing significantly
         
-        # Helper function to concatenate a batch of files
-        def concatenate_batch(files, output_file):
-            input_streams = []
-            for f in files:
-                has_video, has_audio, duration = get_file_info(f)
-                
+        normalized_files = [None] * len(input_files)
+        
+        def normalize_task(index, input_file):
+            output_file = os.path.join(STORAGE_PATH, f"{job_id}_norm_{index}.ts")
+            try:
+                has_video, has_audio, duration = get_file_info(input_file)
                 if not has_video:
-                    print(f"Warning: File {f} has no video stream. Skipping.")
-                    continue
-
-                inp = ffmpeg.input(f)
-                v = inp.video.filter('scale', 1920, 1080).filter('setsar', 1)
+                    print(f"Warning: File {input_file} has no video stream. Skipping.")
+                    return None
+                
+                inp = ffmpeg.input(input_file)
+                # Scale to 1920x1080, set SAR 1, and ensure consistent frame rate
+                v = inp.video.filter('scale', 1920, 1080).filter('setsar', 1).filter('fps', fps=30)
                 
                 if has_audio:
                     a = inp.audio
                 else:
                     a = ffmpeg.input('anullsrc=channel_layout=stereo:sample_rate=44100', format='lavfi').audio.filter('atrim', duration=duration)
                 
-                input_streams.append(v)
-                input_streams.append(a)
-
-            try:
+                # Encode to MPEG-TS with ultrafast preset for speed and concat compatibility
                 (
                     ffmpeg
-                    .concat(*input_streams, v=1, a=1)
-                    .output(output_file)
+                    .output(v, a, output_file, vcodec='libx264', preset='ultrafast', acodec='aac', ar=44100, f='mpegts')
                     .run(overwrite_output=True, capture_stderr=True)
                 )
+                return output_file
             except ffmpeg.Error as e:
-                print(f"FFmpeg error: {e.stderr.decode('utf8')}")
-                raise e
+                print(f"FFmpeg error normalizing {input_file}: {e.stderr.decode('utf8')}")
+                return None
+            except Exception as e:
+                print(f"Error normalizing {input_file}: {str(e)}")
+                return None
 
-        # If we have more inputs than BATCH_SIZE, we process in chunks
-        current_inputs = input_files
-        iteration = 0
+        # Use 4 workers to normalize videos in parallel
+        print(f"Starting parallel normalization of {len(input_files)} videos...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(normalize_task, i, f): i for i, f in enumerate(input_files)}
+            for future in concurrent.futures.as_completed(futures):
+                i = futures[future]
+                normalized_files[i] = future.result()
         
-        while len(current_inputs) > BATCH_SIZE:
-            next_stage_inputs = []
-            num_batches = (len(current_inputs) + BATCH_SIZE - 1) // BATCH_SIZE
-            
-            for i in range(num_batches):
-                batch = current_inputs[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
-                if len(batch) == 1:
-                    next_stage_inputs.append(batch[0])
-                    continue
-                    
-                batch_output = os.path.join(STORAGE_PATH, f"{job_id}_batch_{iteration}_{i}.mp4")
-                concatenate_batch(batch, batch_output)
-                next_stage_inputs.append(batch_output)
-            
-            current_inputs = next_stage_inputs
-            iteration += 1
-            
-        # Final concatenation of the remaining files (<= BATCH_SIZE)
-        concatenate_batch(current_inputs, output_path)
+        # Filter out failed normalizations
+        valid_files = [f for f in normalized_files if f is not None]
+        
+        if not valid_files:
+             raise Exception("No valid video files to concatenate.")
 
-        # Clean up input files
+        # Create concat list file
+        list_file = os.path.join(STORAGE_PATH, f"{job_id}_list.txt")
+        with open(list_file, 'w') as f:
+            for vf in valid_files:
+                f.write(f"file '{vf}'\n")
+        
+        # Fast concat using stream copy
+        print("Concatenating normalized videos...")
+        try:
+            (
+                ffmpeg
+                .input(list_file, format='concat', safe=0)
+                .output(output_path, c='copy', movflags='+faststart')
+                .run(overwrite_output=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as e:
+             print(f"FFmpeg concat error: {e.stderr.decode('utf8')}")
+             raise e
+
+        # Clean up input files and intermediate files
         for f in input_files:
-            os.remove(f)
+            if os.path.exists(f): os.remove(f)
+        for f in valid_files:
+             if os.path.exists(f): os.remove(f)
+        if os.path.exists(list_file): os.remove(list_file)
 
         print(f"Video combination successful: {output_path}")
 
