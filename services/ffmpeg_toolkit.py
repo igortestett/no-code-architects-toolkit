@@ -68,7 +68,17 @@ def process_video_combination(media_urls, job_id, webhook_url=None):
         # Use the concat filter to concatenate the videos
         # This re-encodes the video, preventing issues with mismatched streams/codecs
         # and "black screen" at the end.
-        input_streams = [ffmpeg.input(f) for f in input_files]
+        # We also scale all inputs to 1920x1080 to prevent resolution mismatch errors.
+        input_streams = []
+        for f in input_files:
+            inp = ffmpeg.input(f)
+            # Scale video stream to 1920x1080, forcing aspect ratio if needed (padding could be added here for better results, but scale is simpler)
+            # setsar=1 prevents Aspect Ratio issues when concatenating
+            v = inp.video.filter('scale', 1920, 1080).filter('setsar', 1)
+            a = inp.audio
+            input_streams.append(v)
+            input_streams.append(a)
+
         (
             ffmpeg
             .concat(*input_streams, v=1, a=1)
