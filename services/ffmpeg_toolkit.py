@@ -19,10 +19,32 @@
 import os
 import ffmpeg
 import requests
+import subprocess
+import json
 from services.file_management import download_file
 
 # Set the default local storage directory
 STORAGE_PATH = "/tmp/"
+
+def get_file_info(file_path):
+    cmd = [
+        'ffprobe',
+        '-v', 'quiet',
+        '-print_format', 'json',
+        '-show_format',
+        '-show_streams',
+        '-analyzeduration', '100M',
+        '-probesize', '100M',
+        file_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    data = json.loads(result.stdout)
+    
+    has_video = any(s['codec_type'] == 'video' for s in data.get('streams', []))
+    has_audio = any(s['codec_type'] == 'audio' for s in data.get('streams', []))
+    duration = float(data['format']['duration'])
+    
+    return has_video, has_audio, duration
 
 def process_conversion(media_url, job_id, bitrate='128k', webhook_url=None):
     """Convert media to MP3 format with specified bitrate."""
@@ -71,11 +93,23 @@ def process_video_combination(media_urls, job_id, webhook_url=None):
         # We also scale all inputs to 1920x1080 to prevent resolution mismatch errors.
         input_streams = []
         for f in input_files:
+            has_video, has_audio, duration = get_file_info(f)
+            
+            if not has_video:
+                print(f"Warning: File {f} has no video stream. Skipping.")
+                continue
+
             inp = ffmpeg.input(f)
             # Scale video stream to 1920x1080, forcing aspect ratio if needed (padding could be added here for better results, but scale is simpler)
             # setsar=1 prevents Aspect Ratio issues when concatenating
             v = inp.video.filter('scale', 1920, 1080).filter('setsar', 1)
-            a = inp.audio
+            
+            if has_audio:
+                a = inp.audio
+            else:
+                # Generate silent audio of the same duration
+                a = ffmpeg.input('anullsrc=channel_layout=stereo:sample_rate=44100', format='lavfi').audio.filter('atrim', duration=duration)
+            
             input_streams.append(v)
             input_streams.append(a)
 
