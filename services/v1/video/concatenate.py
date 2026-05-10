@@ -14,8 +14,6 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-
-
 import os
 import ffmpeg
 import requests
@@ -39,11 +37,17 @@ def get_file_info(file_path):
     result = subprocess.run(cmd, capture_output=True, text=True)
     data = json.loads(result.stdout)
     
-    has_video = any(s['codec_type'] == 'video' for s in data.get('streams', []))
+    video_stream = next((s for s in data.get('streams', []) if s['codec_type'] == 'video'), None)
+    
+    has_video = video_stream is not None
     has_audio = any(s['codec_type'] == 'audio' for s in data.get('streams', []))
     duration = float(data['format']['duration'])
     
-    return has_video, has_audio, duration
+    # Extrai a largura e altura originais do vídeo
+    width = int(video_stream['width']) if video_stream else 0
+    height = int(video_stream['height']) if video_stream else 0
+    
+    return has_video, has_audio, duration, width, height
 
 def process_video_concatenate(media_urls, job_id, webhook_url=None):
     """Combine multiple videos into one."""
@@ -58,22 +62,35 @@ def process_video_concatenate(media_urls, job_id, webhook_url=None):
             input_filename = download_file(url, os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_input_{i}"))
             input_files.append(input_filename)
 
+        # Detecção automática de resolução baseada no primeiro vídeo
+        target_w, target_h = 1080, 1920 # Valor padrão (vertical) por segurança
+        if input_files:
+            _, _, _, first_w, first_h = get_file_info(input_files[0])
+            if first_w > 0 and first_h > 0:
+                target_w, target_h = first_w, first_h
+
         # Optimization: Normalize videos in parallel then concat stream-copy
         # This avoids the O(N) complexity of filter graphs and speeds up processing significantly
-        
         normalized_files = [None] * len(input_files)
         
         def normalize_task(index, input_file):
             output_file = os.path.join(LOCAL_STORAGE_PATH, f"{job_id}_norm_{index}.ts")
             try:
-                has_video, has_audio, duration = get_file_info(input_file)
+                has_video, has_audio, duration, _, _ = get_file_info(input_file)
                 if not has_video:
                     print(f"Warning: File {input_file} has no video stream. Skipping.")
                     return None
                 
                 inp = ffmpeg.input(input_file)
-                # Scale to 1920x1080, set SAR 1, and ensure consistent frame rate
-                v = inp.video.filter('scale', 1920, 1080).filter('setsar', 1).filter('fps', fps=30)
+                
+                # Escala automática que mantém proporção e adiciona bordas se o formato for diferente
+                v = (
+                    inp.video
+                    .filter('scale', target_w, target_h, force_original_aspect_ratio='decrease')
+                    .filter('pad', target_w, target_h, '(ow-iw)/2', '(oh-ih)/2')
+                    .filter('setsar', 1)
+                    .filter('fps', fps=30)
+                )
                 
                 if has_audio:
                     a = inp.audio
